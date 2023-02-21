@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 import praw
@@ -9,7 +8,6 @@ import time
 import datetime
 from datetime import datetime, timedelta
 
-
 import psycopg2
 import psycopg2.extras as extras
 from sqlalchemy import create_engine
@@ -17,20 +15,15 @@ from sqlalchemy import create_engine
 #need to authenticate ourselves before scraping data, create a reddit instance
 reddit = praw.Reddit(client_id='6hFNZUMglTJ0OMOIbLk_OQ', client_secret='SE-U9OP2x5j0lqLeNAdL3CH-ac9m9g', user_agent='Webscrape')
 
-
 def submissionsWithin24hours(subreddit):
     #default is new
     subreddit = reddit.subreddit(subreddit)
-    #hot_posts = reddit.subreddit('MachineLearning').hot(limit=10)
 
-    #i = 0
     posts = []
     comments = []
-    #submissionsLast24 = []
+    #for submission in subreddit.new(limit=30): 
     for submission in subreddit.new(limit=None): 
-        #    for submission in subreddit.new(limit=None): 
 
-        #i = i + 1
         sub_name = submission.subreddit
         utcPostTime = submission.created
         submissionDate = datetime.utcfromtimestamp(utcPostTime)
@@ -39,16 +32,15 @@ def submissionsWithin24hours(subreddit):
         currentTime = datetime.utcnow()
 
         #How long ago it was posted.
-        #submissionDelta = currentTime - submissionDate
+        submissionDelta = currentTime - submissionDate
         
-        #submissionDelta = str(submissionDelta)
+        submissionDelta = str(submissionDelta)
         
         #convert the redditor and title class types to strings
         posts.append([str(submission.title), str(submission.author), submission.score, submission.id, str(submission.subreddit), submission.url, submission.num_comments, submission.selftext, submission.created,submission.upvote_ratio,submission.stickied])
 
         #list() will conduct Breadth-first traversal using a queue.
         #limit = none if you want to access all the load more.
-        submission.comments.replace_more(limit=0)
         for comment in submission.comments.list():
             #print(comment.body)
             comments.append([str(comment.author),str(comment.body),comment.created_utc,comment.id,comment.is_submitter,comment.link_id, comment.parent_id,
@@ -75,7 +67,95 @@ def combinestring(zep):
     
     #print(concatstring)
     return concatstring
+	
+#function used to insert passed in dataframes into PostgreSQL
+def InsertTables(stageposts,stagecomments,engine):
+                
+        #insert our data into postgres tables
+        conn = engine[0].connect()
+        
+        
+        
+        comments = pd.DataFrame(stagecomments,columns = ['author', 'body', 'timestampUTC', 'commentid', 'is_submitter','link_id','parent_id','score','is_stickied','submission'])        
+        posts = pd.DataFrame(stageposts,columns=['title', 'author', 'score', 'id', 'subreddit', 'url', 'num_comments', 'body', 'created','upvoteratio','stickied'])
+        
+        
+        comments.to_sql('posts',con = conn,if_exists = 'append', index = False)
+        posts.to_sql('threads',con=conn,if_exists = 'append', index = False)
+        
+        #conn = psycopg2.connect(conn_string)
+        #conn.autocommit = True
+        
+        conn.close()   
+	
+	
+#keep searching for new comments
+#if a comment's thread is not found, add the thread to the threads table
+#comments are streamed oldest to newest
+#skip all comments that are already in table
 
+def comment_stream2(subreddit,comment_table,thread_table, engine):
+    
+    #staging tables are uploaded to postgresql in batches, 
+    #comment_table and thread_table are up to date and stored in python and referenced in loop
+    
+    temptablethread = []
+    temptablecomments = []
+    
+    i = 1
+    for comment in reddit.subreddit(subreddit).stream.comments():
+
+        #if comment is already in
+        #need to cut off first 3 letters from commentid
+        if ( str(comment.id)[3:] in comment_table.commentid.unique() ) == True:
+        #if (comment.id in comment_table.iloc[:,3].unique()) == True:
+            print("Comment is already inside the comment table")
+            continue
+            
+        #if the thread is not in threads table, add it to the threads table
+        
+        if ( str(comment.link_id)[3:] in thread_table.id.unique() ) == False:
+        #if ( str(comment.link_id) in thread_table.iloc[:,3].unique() ) == False:
+            print("attempting to create new thread")
+            tempthread = comment.submission
+            tempthreadparam = [str(tempthread.title), str(tempthread.author), tempthread.score, tempthread.id, 
+                          str(tempthread.subreddit), tempthread.url, tempthread.num_comments, tempthread.selftext, 
+                          tempthread.created,tempthread.upvote_ratio,tempthread.stickied]
+            #update our our staging table for threads.
+            temptablethread.append(tempthreadparam)
+            
+            #append pd type to permanent thread_table
+
+            pdthreads = pd.Series(tempthreadparam,index=['title', 'author', 'score', 'id', 'subreddit', 'url', 'num_comments', 'body', 'created','upvoteratio','stickied'])        
+            thread_table = thread_table.append(pdthreads, ignore_index = True)
+      
+        else: 
+            print("thread already in the table")
+        
+        #final if resolution, add the comment to the temp comment table
+        print('adding new comment')
+        
+        tempcommentparam = [str(comment.author),str(comment.body),comment.created_utc,
+                         comment.id,comment.is_submitter,comment.link_id, comment.parent_id,
+                           comment.score,comment.stickied,str(comment.submission)]    
+        temptablecomments.append(tempcommentparam)
+        
+        #append pd type to permanent comment_table
+        pdcomments = pd.Series(tempcommentparam,index = ['author', 'body', 'timestampUTC', 'commentid', 'is_submitter','link_id','parent_id','score','is_stickied','submission'])        
+        comment_table = comment_table.append(pdcomments, ignore_index = True)
+    
+        
+        i = i + 1
+        #every 20 new comments, start merging our tables with our postgre database
+        if i%20 == 0:
+            print("attempting merge")
+            
+            InsertTables(temptablethread,temptablecomments, engine)
+            #empty our staging tables
+            temptablethread = []
+            temptablecomments = []
+            
+         
 #initiate connection with postgresql with sqlalchemy function
 def get_connection():
     
@@ -96,14 +176,16 @@ def get_connection():
     except Exception as ex:
             print("Connection could not be made due to the following error: \n", ex)
             
+
 def exists_sub(subs):
     exists = True
     try:
         reddit.subreddits.search_by_name(subs, exact = True)
     except Exception as notfound:
         exists = False
-    return exists	
-	
+    return exists
+			
+			
 def obtain_subreddits():
     user_subreddits = []
     
@@ -128,24 +210,7 @@ def obtain_subreddits():
     #return user_subreddits
     return combinestring(user_subreddits)
             
-def get_connection():
-    
-    try:
-    
-        user = input("Enter username:")
-        password = input("Enter password:")
-        host = '127.0.0.1'
-        port = '5432'
-        dbname = 'Reddit Database'
-    
-        #returns the engine, host, and user
-        return (create_engine(
-            url="postgresql://{0}:{1}@{2}:{3}/{4}".format(
-                user, password, host, port, dbname)),
-                user, password, host, port, dbname)
-    except Exception as ex:
-            print("Connection could not be made due to the following error: \n", ex)
-			
+        
 
 #create tables using psycopg2
 def create_tables(params):
@@ -213,44 +278,131 @@ def create_tables(params):
         print("Tables succesfully created in PostgreSQL")
     except (Exception, psycopg2.DatabaseError) as error:
         print(error)
-	
-	
-if __name__ == '__main__':
+		
 
+
+def realupdate(subreddit, stagingcomments, stagingthreads, engine):
+    
+    update = False
+    while update == False:
         
+        realtimeupdate = input("Please enter 'Continue' if you would like to proceed with launching the real time update system, or enter 'No' to finish the database.")
+        if realtimeupdate == "Continue":
+            print("you want to continue")
+            update = True
+            comment_stream2(subreddit,stagingcomments,stagingthreads, engine)
+
+            
+        elif realtimeupdate == "Stop":
+            print("you want to stop")
+            break
+        else:
+            print("you did not put in a valid input, please try again.")
+    
+    
+		
+#In SQL work on cleaning data, removing deleted posts and more..
+
+
+if __name__ == '__main__':
   
     try:
         
         # GET THE CONNECTION OBJECT (ENGINE) FOR THE DATABASE
-        #conn_string = "postgresql://postgres:password@127.0.0.1:5432/Reddit Database"
-        
         engine = get_connection()
         
-        #subreddit = 'KusanaliMains'
         subreddit = obtain_subreddits()
         validSubmissions = submissionsWithin24hours(subreddit)
 
-        
-        
+        #initialize empty tables
         create_tables(engine[1:6])
         
         
         #insert our data into postgres tables
         conn = engine[0].connect()
-        validSubmissions[1].to_sql('posts',con = conn,if_exists = 'replace', index = False)
-        validSubmissions[0].to_sql('threads',con=conn,if_exists = 'replace', index = False)
         
-        #conn = psycopg2.connect(conn_string)
-        #conn.autocommit = True
+        #staging tables for threads and comments to be moved to database
+        stagingthreads = validSubmissions[0]
+        stagingcomments = validSubmissions[1]
         
-        conn.close() 
+        stagingcomments.to_sql('posts',con = conn,if_exists = 'replace', index = False)
+        stagingthreads.to_sql('threads',con=conn,if_exists = 'replace', index = False)
         
         print(
-            f"Connection to the {engine[2]} for user {engine[1]} created successfully.")
-     
+            f"Connection to the {engine[2]} for user {engine[1]} created successfully.")     
+        
+        conn.close()
+        
+        #now we see if the user wants to proceed with realtime updating, or stop here.
+
+        realupdate(subreddit, stagingcomments, stagingthreads, engine)
+        
+        print("Database connection is now terminated and the program has ended.")
+        
+
         
     except Exception as ex:
         print("Could not interact with database due to the following error: \n", ex)
+
+		
+		
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
 	
 	
 	
