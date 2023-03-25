@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 
 import psycopg2
 import psycopg2.extras as extras
+
+import traceback
 from sqlalchemy import create_engine
 
 #need to authenticate ourselves before scraping data, create a reddit instance
@@ -18,12 +20,16 @@ reddit = praw.Reddit(client_id='6hFNZUMglTJ0OMOIbLk_OQ', client_secret='SE-U9OP2
 def submissionsWithin24hours(subreddit):
     #default is new
     subreddit = reddit.subreddit(subreddit)
+    #hot_posts = reddit.subreddit('MachineLearning').hot(limit=10)
 
+    #i = 0
     posts = []
     comments = []
-    #for submission in subreddit.new(limit=30): 
-    for submission in subreddit.new(limit=None): 
+    #submissionsLast24 = []
+    for submission in subreddit.new(limit=30): 
+        #    for submission in subreddit.new(limit=None): 
 
+        #i = i + 1
         sub_name = submission.subreddit
         utcPostTime = submission.created
         submissionDate = datetime.utcfromtimestamp(utcPostTime)
@@ -55,7 +61,6 @@ def submissionsWithin24hours(subreddit):
     return threads,comments
     #return submissionsLast24
 
-
 def combinestring(zep):
     concatstring = ""
     i = 1
@@ -67,13 +72,12 @@ def combinestring(zep):
     
     #print(concatstring)
     return concatstring
-	
-#function used to insert passed in dataframes into PostgreSQL
+
+
 def InsertTables(stageposts,stagecomments,engine):
                 
         #insert our data into postgres tables
         conn = engine[0].connect()
-        
         
         
         comments = pd.DataFrame(stagecomments,columns = ['author', 'body', 'timestampUTC', 'commentid', 'is_submitter','link_id','parent_id','score','is_stickied','submission'])        
@@ -87,24 +91,97 @@ def InsertTables(stageposts,stagecomments,engine):
         #conn.autocommit = True
         
         conn.close()   
-	
-	
+
+
+
+
+def create_thread_update(params,stage):
+    
+        conn = psycopg2.connect(user = params[0],
+                   password = params[1],
+                    host = params[2],
+                    port = params[3],
+                   dbname = params[4])
+    
+        #update score of post stored in postgresql.
+        #batch for posts
+        tempthreads = stage.iloc[:,[3,2,6,9]]
+        ids2 = [f"t3_{post_id}" for post_id in tempthreads.iloc[:,0]]
+   
+        thread_attributes = [(submission.score, submission.num_comments, submission.upvote_ratio, submission.id) for submission in reddit.info(fullnames=ids2)]
+        
+        try:
+            sql = """UPDATE threads SET score = %s, num_comments = %s, upvoteratio = %s WHERE id = %s"""
+            cur = conn.cursor()
+            
+            #executemany(query, vars_list)
+            #vars_list must be a list of tuples
+            cur.executemany(sql, (thread_attributes))
+            conn.commit()
+            cur.close()
+            
+        except (Exception, psycopg2.DatabaseError) as error:
+            print("error encountered")
+            #print(Exception)
+            print(traceback.format_exc())
+        finally:
+            if conn is not None:
+                conn.close()
+                
+        
+def create_posts_update(params, stage):
+    
+        conn = psycopg2.connect(user = params[0],
+                   password = params[1],
+                    host = params[2],
+                    port = params[3],
+                   dbname = params[4])
+    
+        #update score of post stored in postgresql.
+       #batch for posts
+        tempcomm = stage.iloc[:,[3]]
+        ids = [f"t1_{post_id}" for post_id in tempcomm.iloc[:,0]]
+   
+        post_attributes = [(submission.score,submission.id) for submission in reddit.info(fullnames=ids)]
+        
+        try:
+            sql = """UPDATE posts SET score = %s WHERE commentid = %s"""
+            cur = conn.cursor()
+            #cur.execute(sql, (1,))
+            
+            #executemany(query, vars_list)
+            #vars_list must be a list of tuples
+            cur.executemany(sql, (post_attributes))
+            conn.commit()
+            cur.close()
+            
+        except (Exception, psycopg2.DatabaseError) as error:
+            print("error encountered")
+            #print(Exception)
+            print(traceback.format_exc())
+        finally:
+            if conn is not None:
+                conn.close()
+                
 #keep searching for new comments
 #if a comment's thread is not found, add the thread to the threads table
 #comments are streamed oldest to newest
 #skip all comments that are already in table
 
-def comment_stream2(subreddit,comment_table,thread_table, engine):
+def comment_stream3(subreddit, comment_table, thread_table, engine):
+    #how often to merge staging table with the production table? every thread or like every 50 comments?
     
     #staging tables are uploaded to postgresql in batches, 
     #comment_table and thread_table are up to date and stored in python and referenced in loop
+    #might be a more effecient way (access reference directly to sql stored data instead of storing in python?)
     
     temptablethread = []
     temptablecomments = []
     
     i = 1
     for comment in reddit.subreddit(subreddit).stream.comments():
-
+        #print(i)
+        #print(comment.body)
         #if comment is already in
         #need to cut off first 3 letters from commentid
         if ( str(comment.id)[3:] in comment_table.commentid.unique() ) == True:
@@ -113,7 +190,7 @@ def comment_stream2(subreddit,comment_table,thread_table, engine):
             continue
             
         #if the thread is not in threads table, add it to the threads table
-        
+
         if ( str(comment.link_id)[3:] in thread_table.id.unique() ) == False:
         #if ( str(comment.link_id) in thread_table.iloc[:,3].unique() ) == False:
             print("attempting to create new thread")
@@ -131,10 +208,12 @@ def comment_stream2(subreddit,comment_table,thread_table, engine):
       
         else: 
             print("thread already in the table")
+            #print(comment.link_id)
         
         #final if resolution, add the comment to the temp comment table
         print('adding new comment')
         
+    
         tempcommentparam = [str(comment.author),str(comment.body),comment.created_utc,
                          comment.id,comment.is_submitter,comment.link_id, comment.parent_id,
                            comment.score,comment.stickied,str(comment.submission)]    
@@ -147,15 +226,27 @@ def comment_stream2(subreddit,comment_table,thread_table, engine):
         
         i = i + 1
         #every 20 new comments, start merging our tables with our postgre database
+        #also update parameters of the database
         if i%20 == 0:
             print("attempting merge")
-            
             InsertTables(temptablethread,temptablecomments, engine)
+            
+            #access column values of score
+            #tempcommentupdate = comment_table.iloc[:,[3,7]]
+            create_posts_update(engine[1:6],comment_table)
+            print("posts merge done.")
+            
+            #access column values of score, num_comments, and upvoteratio
+            #tempthreadupdate = thread_table.iloc[:,[3,2,6,9]]
+            create_thread_update(engine[1:6], thread_table)
+            print("threads merge done.")
+            
+        
             #empty our staging tables
             temptablethread = []
             temptablecomments = []
-            
-         
+
+
 #initiate connection with postgresql with sqlalchemy function
 def get_connection():
     
@@ -176,7 +267,6 @@ def get_connection():
     except Exception as ex:
             print("Connection could not be made due to the following error: \n", ex)
             
-
 def exists_sub(subs):
     exists = True
     try:
@@ -184,8 +274,8 @@ def exists_sub(subs):
     except Exception as notfound:
         exists = False
     return exists
-			
-			
+
+
 def obtain_subreddits():
     user_subreddits = []
     
@@ -209,8 +299,25 @@ def obtain_subreddits():
             
     #return user_subreddits
     return combinestring(user_subreddits)
-            
-        
+
+def get_connection():
+    
+    try:
+    
+        user = input("Enter username:")
+        password = input("Enter password:")
+        host = '127.0.0.1'
+        port = '5432'
+        dbname = 'Reddit Database2'
+    
+        #returns the engine, host, and user
+        return (create_engine(
+            url="postgresql://{0}:{1}@{2}:{3}/{4}".format(
+                user, password, host, port, dbname)),
+                user, password, host, port, dbname)
+    except Exception as ex:
+            print("Connection could not be made due to the following error: \n", ex)
+
 
 #create tables using psycopg2
 def create_tables(params):
@@ -278,8 +385,6 @@ def create_tables(params):
         print("Tables succesfully created in PostgreSQL")
     except (Exception, psycopg2.DatabaseError) as error:
         print(error)
-		
-
 
 def realupdate(subreddit, stagingcomments, stagingthreads, engine):
     
@@ -295,20 +400,23 @@ def realupdate(subreddit, stagingcomments, stagingthreads, engine):
             
         elif realtimeupdate == "Stop":
             print("you want to stop")
+            update = True
             break
         else:
             print("you did not put in a valid input, please try again.")
-    
-    
-		
-#In SQL work on cleaning data, removing deleted posts and more..
+            
+
 
 
 if __name__ == '__main__':
+
+        
   
     try:
         
         # GET THE CONNECTION OBJECT (ENGINE) FOR THE DATABASE
+        #conn_string = "postgresql://postgres:password@127.0.0.1:5432/Reddit Database"
+        
         engine = get_connection()
         
         subreddit = obtain_subreddits()
@@ -344,89 +452,23 @@ if __name__ == '__main__':
     except Exception as ex:
         print("Could not interact with database due to the following error: \n", ex)
 
-		
-		
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

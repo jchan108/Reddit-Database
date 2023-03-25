@@ -15,4 +15,14 @@ The PRAW API only allows 1000 Threads to be parsed each time a request is called
 
 After the initial threads and posts table is created, the user can choose to have new comments and threads stored in the database in real time. While being run, the python program will fetch all new threads and comments made in the specified subreddits and update the database to include them as they are fetched. 
 
-Additional parameters for the posts and comments, such as number of upvotes and number of subcomments are also updated during this time.
+Additionally, in batches, the python script will re-calculate certain parameters that are subject to change over time for the tables and posts, including post score, thread score, thread number of comments, and thread upvoteratio.
+
+
+Various SQL querys have been written in the RedditQuery.sql file to interact with the database that has been constructed in PostgreSQL for some common use cases.
+
+Additionally, code has been written in SQL to convert the Threads/comments structure to fit to a hierarchical model to allow for simplified queries in situations when lots of sub-comment nodes need to be traversed
+
+
+
+
+
